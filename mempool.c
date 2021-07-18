@@ -6,7 +6,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#define PAGE_SIZE 4096 /* FIXME: set at runtime */
+#define PAGE_SIZE ((unsigned int) sysconf(_SC_PAGESIZE))
 
 struct __mpool {
   int cnt;                /* actual pool count */
