@@ -25,7 +25,7 @@ int main(void)
 
         /* randomly repool some of them */
         if (random() % 10 == 0) /* repool, known size */
-            mpool_repool(mp, ip, sz);
+        mpool_repool(mp, ip);
         if (i % 10000 == 0 && i > 0) {
             putchar('.');
             if (i % 700000 == 0)

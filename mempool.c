@@ -6,15 +6,18 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#define PAGE_SIZE ((unsigned int) sysconf(_SC_PAGESIZE))
+#define PAGE_SIZE ((unsigned int)sysconf(_SC_PAGESIZE))
+#define FASTBIN_SIZE 7
+#define HEADER_SIZE 4
 
 struct __mpool {
-  int cnt;                /* actual pool count */
-  int pal;                /* pool array length (2^x ceil of cnt) */
-  int min_pool, max_pool; /* minimum/maximum pool size */
-  void **ps;              /* pools */
-  int *sizes;             /* chunk size for each pool */
-  void *hs[1];            /* heads for pools' free lists */
+  int cnt;                     /* actual pool count */
+  int pal;                     /* pool array length (2^x ceil of cnt) */
+  int min_pool, max_pool;      /* minimum/maximum pool size */
+  void **ps;                   /* pools */
+  int *sizes;                  /* chunk size for each pool */
+  void *fastbin[FASTBIN_SIZE]; /* fastbin for small chunk size */
+  void *hs[1];                 /* heads for pools' free lists */
 };
 
 static void *get_mmap(long sz) {
@@ -87,6 +90,7 @@ static int add_pool(mpool *mp, void *p, int sz) {
  * Returns NULL on error.
  */
 mpool *mpool_init(int min2, int max2) {
+  assert(min2 >= 3);
   int cnt = max2 - min2 + 1; /* pool array count */
   int palen = iceil2(cnt);
 
@@ -104,6 +108,7 @@ mpool *mpool_init(int min2, int max2) {
   mp->min_pool = (1 << min2), mp->max_pool = (1 << max2);
   memset(sizes, 0, palen * sizeof(int));
   memset(pools, 0, palen * sizeof(void *));
+  memset(mp->fastbin, 0, sizeof(mp->fastbin));
   memset(mp->hs, 0, cnt * sizeof(void *));
 
   return mp;
@@ -136,11 +141,14 @@ void *mpool_alloc(mpool *mp, int sz) {
   void **cur;
   int i, p;
   assert(mp);
+  sz += HEADER_SIZE;
   if (sz >= mp->max_pool) {
     cur = get_mmap(sz); /* just mmap it */
     if (!cur)
       return NULL;
-    return cur;
+    int *tmp = (int *)cur;
+    *tmp = sz; /* set chunk size */
+    return tmp + 1;
   }
 
   long szceil = 0;
@@ -151,6 +159,14 @@ void *mpool_alloc(mpool *mp, int sz) {
     }
   }
   assert(szceil > 0);
+
+  if (i < FASTBIN_SIZE) { /* try and find a chunk from fastbin */
+    cur = mp->fastbin[i];
+    if (cur) {
+      mp->fastbin[i] = *cur;
+      goto _done;
+    }
+  }
 
   cur = mp->hs[i]; /* get current head */
   if (!cur) {      /* lazily allocate and initialize pool */
@@ -172,25 +188,46 @@ void *mpool_alloc(mpool *mp, int sz) {
     if (add_pool(mp, np, szceil) < 0)
       return NULL;
   }
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wint-to-pointer-cast"
   assert(*cur > (void *)PAGE_SIZE);
+#pragma GCC diagnostic pop
 
   mp->hs[i] = *cur; /* set head to next head */
-  return cur;
+
+_done:;
+  int *tmp = (int *)cur;
+  *tmp = szceil; /* set chunk size */
+  return tmp + 1;
 }
 
 /* Push an individual pointer P back on the freelist for the pool with size
  * SZ cells. if SZ is > the max pool size, just munmap it.
  * Return pointer P (SZ bytes in size) to the appropriate pool.
  */
-void mpool_repool(mpool *mp, void *p, int sz) {
-  int i = 0;
+void mpool_repool(mpool *mp, void *p) {
+  int i;
 
-  if (sz > mp->max_pool) {
-    if (munmap(p, sz) == -1)
-      fprintf(stderr, "Failed to unmap %d bytes at %p\n", sz, p);
+  p -= HEADER_SIZE;
+  int *chunk_header = (int *)p;
+  int chunk_size = *chunk_header;
+  if (chunk_size > mp->max_pool) {
+    if (munmap(p, chunk_size) == -1)
+      fprintf(stderr, "Failed to unmap %d bytes at %p\n", chunk_size, p);
     return;
   }
 
+  /* If the chunk fits into a fastbin, put it on the fastbin. */
+  i = (chunk_size >> 4) - 1;
+  if (i < FASTBIN_SIZE) {
+    void **fp = (void **)p;
+    *fp = mp->fastbin[i];
+    assert(fp);
+    mp->fastbin[i] = fp;
+    return;
+  }
+
+  i = 0;
   void **ip = (void **)p;
   *ip = mp->hs[i];
   assert(ip);

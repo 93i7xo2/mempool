@@ -6,7 +6,7 @@ VALGRIND_OPTS = \
 all: build
 
 build:
-	$(CC) -o example -Wall -Werror example.c mempool.c
+	$(CC) -o example -Wall -Werror -g example.c mempool.c
 
 test: build
 	# valgrind $(VALGRIND_OPTS) ./example
